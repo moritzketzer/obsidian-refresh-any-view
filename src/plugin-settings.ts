@@ -11,6 +11,7 @@ export class PluginSettings {
   public autoRefreshMode: AutoRefreshMode = AutoRefreshMode.Off;
   public excludeViewTypesForAutoRefresh: readonly string[] = [];
   public includeViewTypesForAutoRefresh: readonly string[] = [];
+  public shouldAutoRefreshEmbeddedImages = false;
   public shouldAutoRefreshMarkdownViewInSourceMode = false;
   public shouldAutoRefreshOnFileChange = false;
   public shouldLoadDeferredViewsOnAutoRefresh = false;

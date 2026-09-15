@@ -6,6 +6,16 @@ import type {
 } from 'obsidian';
 
 import {
+  mkdtemp,
+  rename,
+  rm,
+  writeFile
+} from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { Platform } from 'obsidian';
+import {
   noop,
   noopAsync
 } from 'obsidian-dev-utils/function';
@@ -55,9 +65,14 @@ vi.mock('obsidian-dev-utils/obsidian/file-system', async (importOriginal) => ({
 // strict-proxy stub carrying a controllable `settings` object and an `on` method that captures the
 // `saveSettings` callback is sufficient.
 const mockSettings = new PluginSettings();
+let capturedLoadSettingsCallback: (() => Promise<void>) | undefined;
 let capturedSaveSettingsCallback: (() => Promise<void>) | undefined;
-const onSaveSettings = vi.fn((_name: string, callback: () => Promise<void>) => {
-  capturedSaveSettingsCallback = callback;
+const onSaveSettings = vi.fn((name: string, callback: () => Promise<void>) => {
+  if (name === 'loadSettings') {
+    capturedLoadSettingsCallback = callback;
+  } else {
+    capturedSaveSettingsCallback = callback;
+  }
   return { asyncEventSource: { offref: vi.fn() } };
 });
 
@@ -125,6 +140,7 @@ describe('RefreshAnyViewComponent', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     capturedSaveSettingsCallback = undefined;
+    capturedLoadSettingsCallback = undefined;
     resetSettings();
 
     onWorkspace = vi.fn(() => ({ id: 'workspace-event-ref' }));
@@ -167,6 +183,163 @@ describe('RefreshAnyViewComponent', () => {
     it('should register the layout-ready handler via the base class', () => {
       createLoadedComponent();
       expect(onLayoutReady).toHaveBeenCalledWith(expect.any(Function));
+    });
+  });
+
+  describe('embedded image watching', () => {
+    let directory = '';
+
+    beforeEach(async () => {
+      directory = await mkdtemp(join(tmpdir(), 'refresh-images-'));
+      mockSettings.shouldAutoRefreshEmbeddedImages = true;
+      appMock.vault.adapter.getResourcePath = (path: string): string => `app://vault/vault/${path}`;
+      appMock.vault.getResourcePath = (file): string => `app://vault/vault/${file.path}?mtime=2`;
+      Platform.isDesktopApp = true;
+      Platform.isDesktop = true;
+    });
+
+    afterEach(async () => {
+      loadedComponent?.unload();
+      await rm(directory, { force: true, recursive: true });
+    });
+
+    it.each(['preview', 'source'])('updates only a changed vault image in %s without refreshing the note', async (mode) => {
+      const rerender = vi.fn();
+      const dispatch = vi.fn();
+      const leaf = createLeafStub({});
+      const view = createMarkdownView({ dispatch, mode, rerender }, leaf);
+      const image = view.containerEl.createEl('img', { attr: { src: 'app://vault/vault/plot%20one.svg?mtime=1#panel' } });
+      const other = view.containerEl.createEl('img', { attr: { src: 'app://vault/vault/other.svg' } });
+      iterateAllLeaves.mockImplementation((callback: (leaf: WorkspaceLeafOriginal) => void) => {
+        callback(leaf);
+      });
+      const component = createLoadedComponent();
+      await testable(component).onLayoutReady();
+      const original = image.src;
+      const otherOriginal = other.src;
+
+      testable(component).handleModify(castTo<TAbstractFile>({ path: 'plot one.svg' }));
+
+      await vi.waitFor(() => {
+        expect(image.src).not.toBe(original);
+      });
+      expect(new URL(image.src).pathname).toBe('/vault/plot%20one.svg');
+      expect(new URL(image.src).hash).toBe('#panel');
+      expect(other.src).toBe(otherOriginal);
+      expect(rerender).not.toHaveBeenCalled();
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(mockSettings.autoRefreshMode).toBe(AutoRefreshMode.Off);
+    });
+
+    it('starts watching when saved settings finish loading after layout ready', async () => {
+      mockSettings.shouldAutoRefreshEmbeddedImages = false;
+      const leaf = createLeafStub({});
+      const view = createMarkdownView({ mode: 'preview' }, leaf);
+      const image = view.containerEl.createEl('img', { attr: { src: 'app://vault/vault/plot.svg' } });
+      iterateAllLeaves.mockImplementation((callback: (leaf: WorkspaceLeafOriginal) => void) => {
+        callback(leaf);
+      });
+      const component = createLoadedComponent();
+      await testable(component).onLayoutReady();
+      mockSettings.shouldAutoRefreshEmbeddedImages = true;
+      await capturedLoadSettingsCallback?.();
+      expect(new URL(image.src).searchParams.get('refresh-preview')).toBeTruthy();
+    });
+
+    it('invalidates newly displayed images even when the file changed while the view was closed', async () => {
+      const leaf = createLeafStub({});
+      const view = createMarkdownView({ mode: 'preview' }, leaf);
+      const image = view.containerEl.createEl('img', { attr: { src: 'app://vault/vault/plot.svg' } });
+      iterateAllLeaves.mockImplementation((callback: (leaf: WorkspaceLeafOriginal) => void) => {
+        callback(leaf);
+      });
+      const component = createLoadedComponent();
+      await testable(component).onLayoutReady();
+      expect(new URL(image.src).searchParams.get('refresh-preview')).toBeTruthy();
+      image.remove();
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, 0);
+      });
+      const next = view.containerEl.createEl('img', { attr: { src: 'app://vault/vault/plot.svg' } });
+      await vi.waitFor(() => {
+        expect(new URL(next.src).searchParams.get('refresh-preview')).toBeTruthy();
+      });
+      expect(next.src).not.toBe(image.src);
+    });
+
+    it.each(['file', 'app'])('watches external %s images through overwrite and atomic replacement', async (scheme) => {
+      const path = join(directory, 'plot one.svg');
+      await writeFile(path, 'first');
+      const leaf = createLeafStub({});
+      const view = createMarkdownView({ mode: 'source' }, leaf);
+      const url = pathToFileURL(path);
+      const src = scheme === 'file' ? url.href : `app://vault${url.pathname}`;
+      const image = view.containerEl.createEl('img', { attr: { src } });
+      iterateAllLeaves.mockImplementation((callback: (leaf: WorkspaceLeafOriginal) => void) => {
+        callback(leaf);
+      });
+      const component = createLoadedComponent();
+      await testable(component).onLayoutReady();
+      // Allow the native watcher to attach before delivering actual filesystem events.
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, 100);
+      });
+      let previous = image.src;
+      await writeFile(path, 'second');
+      await vi.waitFor(() => {
+        expect(image.src).not.toBe(previous);
+      });
+      previous = image.src;
+      const replacement = join(directory, 'replacement.svg');
+      await writeFile(replacement, 'third');
+      await rename(replacement, path);
+      await vi.waitFor(() => {
+        expect(image.src).not.toBe(previous);
+      });
+      previous = image.src;
+      await writeFile(path, 'fourth');
+      await vi.waitFor(() => {
+        expect(image.src).not.toBe(previous);
+      });
+      previous = image.src;
+      view.unload();
+      await writeFile(path, 'after close');
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, 250);
+      });
+      expect(image.src).toBe(previous);
+    });
+
+    it('watches lazily rendered images and stops on settings disable', async () => {
+      const path = join(directory, 'late.svg');
+      await writeFile(path, 'first');
+      const leaf = createLeafStub({});
+      const view = createMarkdownView({ mode: 'preview' }, leaf);
+      iterateAllLeaves.mockImplementation((callback: (leaf: WorkspaceLeafOriginal) => void) => {
+        callback(leaf);
+      });
+      const component = createLoadedComponent();
+      await testable(component).onLayoutReady();
+      const image = view.containerEl.createEl('img', { attr: { src: pathToFileURL(path).href } });
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, 100);
+      });
+      const previous = image.src;
+      await writeFile(path, 'second');
+      await vi.waitFor(() => {
+        expect(image.src).not.toBe(previous);
+      });
+      mockSettings.shouldAutoRefreshEmbeddedImages = false;
+      await capturedSaveSettingsCallback?.();
+      const disabledSrc = image.src;
+      await writeFile(path, 'disabled');
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, 250);
+      });
+      expect(image.src).toBe(disabledSrc);
+      mockSettings.shouldAutoRefreshEmbeddedImages = true;
+      await capturedSaveSettingsCallback?.();
+      expect(image.src).not.toBe(disabledSrc);
     });
   });
 
@@ -973,6 +1146,7 @@ function resetSettings(): void {
   const defaults = new PluginSettings();
   mockSettings.autoRefreshIntervalInSeconds = defaults.autoRefreshIntervalInSeconds;
   mockSettings.autoRefreshMode = defaults.autoRefreshMode;
+  mockSettings.shouldAutoRefreshEmbeddedImages = false;
   mockSettings.excludeViewTypesForAutoRefresh = [];
   mockSettings.includeViewTypesForAutoRefresh = [];
   mockSettings.shouldAutoRefreshMarkdownViewInSourceMode = defaults.shouldAutoRefreshMarkdownViewInSourceMode;

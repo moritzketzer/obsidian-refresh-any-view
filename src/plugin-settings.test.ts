@@ -17,6 +17,7 @@ describe('PluginSettings', () => {
     expect(settings.excludeViewTypesForAutoRefresh).toEqual([]);
     expect(settings.includeViewTypesForAutoRefresh).toEqual([]);
     expect(settings.shouldAutoRefreshMarkdownViewInSourceMode).toBe(false);
+    expect(settings.shouldAutoRefreshEmbeddedImages).toBe(false);
     expect(settings.shouldAutoRefreshOnFileChange).toBe(false);
     expect(settings.shouldLoadDeferredViewsOnAutoRefresh).toBe(false);
     expect(settings.shouldLoadDeferredViewsOnStart).toBe(false);

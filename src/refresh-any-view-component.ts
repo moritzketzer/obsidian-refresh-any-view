@@ -48,6 +48,12 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
   public override onload(): void {
     super.onload();
     this.registerEvent(this.app.workspace.on('layout-change', this.handleLayoutChange.bind(this)));
+    registerAsyncEvent(
+      this,
+      this.pluginSettingsComponent.on('loadSettings', () => {
+        this.syncImageWatching();
+      })
+    );
     this.register(() => {
       for (const [view, component] of this.localImageRefreshComponents) {
         view.removeChild(component);
@@ -147,6 +153,7 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
       this,
       this.pluginSettingsComponent.on('saveSettings', () => {
         this.registerAutoRefreshTimer();
+        this.syncImageWatching();
       })
     );
 
@@ -190,7 +197,20 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
     return leaves;
   }
 
+  private getLocalImageRefreshComponent(view: View): LocalImageRefreshComponent {
+    let component = this.localImageRefreshComponents.get(view);
+    if (!component) {
+      component = view.addChild(new LocalImageRefreshComponent(view.containerEl));
+      this.localImageRefreshComponents.set(view, component);
+      view.register(() => {
+        this.localImageRefreshComponents.delete(view);
+      });
+    }
+    return component;
+  }
+
   private handleLayoutChange(): void {
+    this.syncImageWatching();
     const itemView = this.app.workspace.getActiveViewOfType(ItemView);
     if (!itemView) {
       return;
@@ -209,6 +229,11 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
   }
 
   private handleModify(file: TAbstractFile): void {
+    if (this.pluginSettingsComponent.settings.shouldAutoRefreshEmbeddedImages && isFile(file)) {
+      for (const component of this.localImageRefreshComponents.values()) {
+        component.refreshFile(this.app.vault.getResourcePath(file));
+      }
+    }
     if (!this.pluginSettingsComponent.settings.shouldAutoRefreshOnFileChange) {
       return;
     }
@@ -258,15 +283,7 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
   }
 
   private refreshLocalImages(view: View): void {
-    let component = this.localImageRefreshComponents.get(view);
-    if (!component) {
-      component = view.addChild(new LocalImageRefreshComponent(view.containerEl));
-      this.localImageRefreshComponents.set(view, component);
-      view.register(() => {
-        this.localImageRefreshComponents.delete(view);
-      });
-    }
-    component.refresh();
+    this.getLocalImageRefreshComponent(view).refresh();
   }
 
   private async refreshViews(checkView: (view: View) => boolean): Promise<void> {
@@ -297,5 +314,17 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
     );
 
     this.registerInterval(this.autoRefreshIntervalId);
+  }
+
+  private syncImageWatching(): void {
+    const isEnabled = this.pluginSettingsComponent.settings.shouldAutoRefreshEmbeddedImages;
+    if (isEnabled) {
+      for (const leaf of this.getLeaves((candidate) => !candidate.isDeferred)) {
+        this.getLocalImageRefreshComponent(leaf.view);
+      }
+    }
+    for (const [view, component] of this.localImageRefreshComponents) {
+      component.setWatching(isEnabled && this.pluginSettingsComponent.settings.isViewTypeIncluded(view.getViewType()), isEnabled ? this.app.vault.adapter.getResourcePath('') : '');
+    }
   }
 }

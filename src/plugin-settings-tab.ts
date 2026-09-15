@@ -15,6 +15,15 @@ export class PluginSettingsTab extends PluginSettingsTabBase<PluginSettings> {
   protected override getSettingDefinitionItems(): SettingDefinitionItem[] {
     return [
       this.settingEx({
+        desc: 'Reload embedded local images when their files change, without refreshing the note. External images are supported on desktop. Works with the auto refresh timer off.',
+        name: 'Automatically refresh embedded images',
+        render: (setting) => {
+          setting.addToggle((toggle) => {
+            this.bind({ propertyName: 'shouldAutoRefreshEmbeddedImages', valueComponent: toggle });
+          });
+        }
+      }),
+      this.settingEx({
         desc: createFragment((f) => {
           f.appendText('Whether to auto refresh the file view when the file is changed.');
           f.createEl('br');

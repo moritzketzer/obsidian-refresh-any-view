@@ -80,6 +80,7 @@ describe('PluginSettingsTab', () => {
     renderRows(tab);
     const boundKeys = vi.mocked(PluginSettingsTabBase.prototype.bind).mock.calls.map((call) => call[0].propertyName);
     expect(boundKeys).toContain('shouldAutoRefreshOnFileChange');
+    expect(boundKeys).toContain('shouldAutoRefreshEmbeddedImages');
     expect(boundKeys).toContain('autoRefreshMode');
     expect(boundKeys).toContain('autoRefreshIntervalInSeconds');
     expect(boundKeys).toContain('includeViewTypesForAutoRefresh');
