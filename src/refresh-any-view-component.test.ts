@@ -17,6 +17,7 @@ import {
   ItemView,
   MarkdownView,
   TextFileView,
+  View,
   WorkspaceLeaf
 } from 'obsidian-test-mocks/obsidian';
 import {
@@ -66,6 +67,7 @@ const TextFileViewClass = castTo<new (leaf: WorkspaceLeaf) => TextFileView>(Text
 const MarkdownViewClass = castTo<new (leaf: WorkspaceLeaf) => MarkdownView>(MarkdownView);
 const FileViewClass = castTo<new (leaf: WorkspaceLeaf) => FileView>(FileView);
 const ItemViewClass = castTo<new (leaf: WorkspaceLeaf) => ItemView>(ItemView);
+const ViewClass = castTo<new (leaf: WorkspaceLeaf) => View>(View);
 
 // --- Component private surface (sanctioned `castTo<Testable>` access) ---
 
@@ -228,6 +230,93 @@ describe('RefreshAnyViewComponent', () => {
   });
 
   describe('refreshView', () => {
+    it.each(['preview', 'source'])('should reload local images in %s mode without changing their paths', async (mode) => {
+      const component = createLoadedComponent();
+      const view = createMarkdownView({ mode }, createLeafStub({}));
+      const image = activeWindow.createEl('img');
+      const original = 'app://vault/figures/plot%20one.svg?mtime=123#panel';
+      image.src = original;
+      view.containerEl.append(image);
+
+      await component.refreshView(view);
+
+      const refreshed = new URL(image.src);
+      expect(refreshed.searchParams.get('refresh-preview')).toBeTruthy();
+      refreshed.searchParams.delete('refresh-preview');
+      expect(refreshed.href).toBe(original);
+      const firstRefresh = image.src;
+
+      await component.refreshView(view);
+      expect(image.src).not.toBe(firstRefresh);
+    });
+
+    it('should reload images rendered after the refresh returns', async () => {
+      const component = createLoadedComponent();
+      const view = createMarkdownView({ mode: 'preview' }, createLeafStub({}));
+      await component.refreshView(view);
+      const image = activeWindow.createEl('img');
+      image.src = 'file:///figures/plot.png';
+      view.containerEl.append(image);
+
+      await vi.waitFor(() => {
+        expect(new URL(image.src).searchParams.get('refresh-preview')).toBeTruthy();
+      });
+
+      image.setAttribute('src', 'file:///figures/other.png');
+      await vi.waitFor(() => {
+        expect(new URL(image.src).searchParams.get('refresh-preview')).toBeTruthy();
+      });
+    });
+
+    it('should leave remote and inline images unchanged', async () => {
+      const component = createLoadedComponent();
+      const view = createMarkdownView({ mode: 'preview' }, createLeafStub({}));
+      const sources = ['https://example.com/plot.png?signed=123', 'data:image/png;base64,AA==', 'blob:https://example.com/image'];
+      const images = sources.map((source) => {
+        const image = activeWindow.createEl('img');
+        image.src = source;
+        view.containerEl.append(image);
+        return image;
+      });
+
+      await component.refreshView(view);
+      expect(images.map((image) => image.src)).toEqual(sources);
+    });
+
+    it('should reload images in the replacement view after a full rebuild', async () => {
+      const component = createLoadedComponent();
+      mockSettings.shouldUseQuickMarkdownViewRefresh = false;
+      const leaf = createLeafStub({});
+      const view = createMarkdownView({ mode: 'preview' }, leaf);
+      const image = activeWindow.createEl('img');
+      image.src = 'app://vault/figures/plot.png';
+      leaf.rebuildView = (): Promise<void> => {
+        const replacement = createMarkdownView({ mode: 'preview' }, leaf);
+        replacement.containerEl.append(image);
+        view.unload();
+        return noopAsync();
+      };
+
+      await component.refreshView(view);
+      expect(new URL(image.src).searchParams.get('refresh-preview')).toBeTruthy();
+    });
+
+    it.each(['view', 'plugin'])('should stop observing images when the %s unloads', async (owner) => {
+      const component = createLoadedComponent();
+      const view = createMarkdownView({ mode: 'preview' }, createLeafStub({}));
+      await component.refreshView(view);
+      if (owner === 'view') {
+        view.unload();
+      } else {
+        component.unload();
+      }
+      const image = activeWindow.createEl('img');
+      image.src = 'file:///figures/plot.png';
+      view.containerEl.append(image);
+      await noopAsync();
+      expect(image.src).toBe('file:///figures/plot.png');
+    });
+
     it('should load and rebuild a generic view', async () => {
       const component = createLoadedComponent();
       const loadIfDeferred = vi.fn(asyncNoop);
@@ -800,11 +889,13 @@ function createFileView(spec: FileViewSpec, leaf: WorkspaceLeafOriginal): ViewOr
 }
 
 function createGenericView(members: GenericViewSpec, leaf: WorkspaceLeafOriginal): ViewOriginal {
-  return strictProxy<ViewOriginal>({
-    containerEl: members.containerEl ?? createScrollEl(),
-    getViewType: members.getViewType ?? ((): string => members.viewType ?? 'generic'),
-    leaf
-  });
+  const view = castTo<ViewOriginal>(new ViewClass(realLeaf()));
+  view.containerEl = members.containerEl ?? createScrollEl();
+  view.getViewType = members.getViewType ?? ((): string => members.viewType ?? 'generic');
+  view.leaf = leaf;
+  leaf.view = view;
+  view.load();
+  return view;
 }
 
 function createItemView(spec: ItemViewSpec): ViewOriginal {
@@ -815,6 +906,8 @@ function createItemView(spec: ItemViewSpec): ViewOriginal {
   augmented.containerEl = createScrollEl();
   augmented.getViewType = (): string => 'item';
   augmented.leaf = leaf;
+  leaf.view = castTo<ViewOriginal>(view);
+  view.load();
   return castTo<ViewOriginal>(view);
 }
 
@@ -851,11 +944,13 @@ function createMarkdownView(spec: MarkdownViewSpec, leaf: WorkspaceLeafOriginal)
       state: { doc: { length: 10 }, selection: {} }
     }
   };
+  leaf.view = castTo<ViewOriginal>(view);
+  view.load();
   return castTo<ViewOriginal>(view);
 }
 
 function createScrollEl(): HTMLElement {
-  return castTo<HTMLElement>({ scrollLeft: 0, scrollTop: 0 });
+  return activeWindow.createDiv();
 }
 
 function createTextFileView(spec: TextFileViewSpec, leaf: WorkspaceLeafOriginal): ViewOriginal {
@@ -865,6 +960,8 @@ function createTextFileView(spec: TextFileViewSpec, leaf: WorkspaceLeafOriginal)
   augmented.save = spec.save;
   augmented.containerEl = createScrollEl();
   augmented.leaf = leaf;
+  leaf.view = castTo<ViewOriginal>(view);
+  view.load();
   return castTo<ViewOriginal>(view);
 }
 

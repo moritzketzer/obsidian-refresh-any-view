@@ -20,6 +20,7 @@ import { getCacheSafe } from 'obsidian-dev-utils/obsidian/metadata-cache';
 
 import type { PluginSettingsComponent } from './plugin-settings-component.ts';
 
+import { LocalImageRefreshComponent } from './local-image-refresh-component.ts';
 import { WorkspaceLeafOnOpenTabHeaderMenuPatchComponent } from './patches/workspace-leaf-on-open-tab-header-menu-patch-component.ts';
 import { AutoRefreshMode } from './plugin-settings.ts';
 
@@ -32,6 +33,7 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
   private autoRefreshIntervalId: null | number = null;
 
   private readonly itemViews = new WeakSet<ItemView>();
+  private readonly localImageRefreshComponents = new Map<View, LocalImageRefreshComponent>();
   private readonly pluginSettingsComponent: PluginSettingsComponent;
 
   public constructor(params: RefreshAnyViewComponentConstructorParams) {
@@ -46,6 +48,12 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
   public override onload(): void {
     super.onload();
     this.registerEvent(this.app.workspace.on('layout-change', this.handleLayoutChange.bind(this)));
+    this.register(() => {
+      for (const [view, component] of this.localImageRefreshComponents) {
+        view.removeChild(component);
+      }
+      this.localImageRefreshComponents.clear();
+    });
   }
 
   public async refreshAllOpenViews(): Promise<void> {
@@ -80,6 +88,7 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
           await leaf.rebuildView();
         }
 
+        this.refreshLocalImages(leaf.view);
         restoreScrollPosition();
 
         return;
@@ -112,10 +121,12 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
       window.requestAnimationFrame(() => {
         cm.scrollDOM.scrollTop = scrollTop;
       });
+      this.refreshLocalImages(leaf.view);
       return;
     }
 
     await leaf.rebuildView();
+    this.refreshLocalImages(leaf.view);
     restoreScrollPosition();
 
     function restoreScrollPosition(): void {
@@ -244,6 +255,18 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
     const leaves = this.getLeaves(() => true);
     const promises = leaves.map((leaf) => leaf.loadIfDeferred());
     await Promise.all(promises);
+  }
+
+  private refreshLocalImages(view: View): void {
+    let component = this.localImageRefreshComponents.get(view);
+    if (!component) {
+      component = view.addChild(new LocalImageRefreshComponent(view.containerEl));
+      this.localImageRefreshComponents.set(view, component);
+      view.register(() => {
+        this.localImageRefreshComponents.delete(view);
+      });
+    }
+    component.refresh();
   }
 
   private async refreshViews(checkView: (view: View) => boolean): Promise<void> {
