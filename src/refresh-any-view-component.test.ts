@@ -231,6 +231,116 @@ describe('RefreshAnyViewComponent', () => {
       expect(mockSettings.autoRefreshMode).toBe(AutoRefreshMode.Off);
     });
 
+    it('refreshes vault images in a lightbox opened with the original URL', async () => {
+      const leaf = createLeafStub({});
+      const view = createMarkdownView({ mode: 'source' }, leaf);
+      const src = 'app://vault/vault/plot%20one.svg?mtime=1#panel';
+      const inlineImage = view.containerEl.createEl('img', { attr: { src } });
+      iterateAllLeaves.mockImplementation((callback: (leaf: WorkspaceLeafOriginal) => void) => {
+        callback(leaf);
+      });
+      const component = createLoadedComponent();
+      await testable(component).onLayoutReady();
+      const modify = castTo<(file: TAbstractFile) => void>(onVault.mock.calls.find(([name]) => name === 'modify')?.[1]);
+      const previousInline = inlineImage.src;
+      modify(castTo<TAbstractFile>({ path: 'plot one.svg' }));
+      await vi.waitFor(() => {
+        expect(inlineImage.src).not.toBe(previousInline);
+      });
+
+      const lightbox = activeDocument.body.createDiv('lightbox');
+      const image = lightbox.createEl('img', { attr: { src } });
+      const unrelated = activeDocument.body.createEl('img', { attr: { src } });
+      try {
+        await vi.waitFor(() => {
+          expect(image.src).not.toBe(src);
+        });
+        const refreshed = new URL(image.src);
+        refreshed.searchParams.delete('refresh-preview');
+        expect(refreshed.href).toBe(src);
+        expect(unrelated.src).toBe(src);
+        const previous = image.src;
+        modify(castTo<TAbstractFile>({ path: 'plot one.svg' }));
+        await vi.waitFor(() => {
+          expect(image.src).not.toBe(previous);
+        });
+        lightbox.remove();
+        await noopAsync();
+        image.setAttribute('src', src);
+        activeDocument.body.append(lightbox);
+        await vi.waitFor(() => {
+          expect(image.src).not.toBe(src);
+        });
+        expect(image.src).not.toBe(previous);
+      } finally {
+        lightbox.remove();
+        unrelated.remove();
+      }
+    });
+
+    it('watches external images while the lightbox is open', async () => {
+      const path = join(directory, 'zoom.svg');
+      await writeFile(path, '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10" fill="red"/></svg>');
+      const leaf = createLeafStub({});
+      createMarkdownView({ mode: 'source' }, leaf);
+      iterateAllLeaves.mockImplementation((callback: (leaf: WorkspaceLeafOriginal) => void) => {
+        callback(leaf);
+      });
+      const component = createLoadedComponent();
+      await testable(component).onLayoutReady();
+      const src = pathToFileURL(path).href;
+      const lightbox = activeDocument.body.createDiv('lightbox');
+      const image = lightbox.createEl('img', { attr: { src } });
+      try {
+        await vi.waitFor(() => {
+          expect(image.src).not.toBe(src);
+        });
+        const previous = image.src;
+        await writeFile(path, '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10" fill="blue"/></svg>');
+        await vi.waitFor(() => {
+          expect(image.src).not.toBe(previous);
+        });
+        lightbox.remove();
+        await noopAsync();
+        image.setAttribute('src', src);
+        await noopAsync();
+        expect(image.src).toBe(src);
+      } finally {
+        lightbox.remove();
+      }
+    });
+
+    it.each(['settings', 'plugin'])('stops discovering lightbox images when disabled through %s', async (owner) => {
+      const leaf = createLeafStub({});
+      createMarkdownView({ mode: 'source' }, leaf);
+      iterateAllLeaves.mockImplementation((callback: (leaf: WorkspaceLeafOriginal) => void) => {
+        callback(leaf);
+      });
+      const component = createLoadedComponent();
+      await testable(component).onLayoutReady();
+      const src = 'app://vault/vault/plot.svg';
+      const lightbox = activeDocument.body.createDiv('lightbox');
+      const image = lightbox.createEl('img', { attr: { src } });
+      try {
+        await vi.waitFor(() => {
+          expect(image.src).not.toBe(src);
+        });
+        if (owner === 'settings') {
+          mockSettings.shouldAutoRefreshEmbeddedImages = false;
+          await capturedSaveSettingsCallback?.();
+        } else {
+          component.unload();
+        }
+        image.setAttribute('src', src);
+        lightbox.remove();
+        activeDocument.body.append(lightbox);
+        await noopAsync();
+        expect(image.src).toBe(src);
+      } finally {
+        lightbox.remove();
+      }
+    });
+
     it('starts watching when saved settings finish loading after layout ready', async () => {
       mockSettings.shouldAutoRefreshEmbeddedImages = false;
       const leaf = createLeafStub({});

@@ -33,6 +33,8 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
   private autoRefreshIntervalId: null | number = null;
 
   private readonly itemViews = new WeakSet<ItemView>();
+  private readonly lightboxImageRefreshComponents = new Map<HTMLElement, LocalImageRefreshComponent>();
+  private readonly lightboxObservers = new Map<Document, MutationObserver>();
   private readonly localImageRefreshComponents = new Map<View, LocalImageRefreshComponent>();
   private readonly pluginSettingsComponent: PluginSettingsComponent;
 
@@ -59,6 +61,11 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
         view.removeChild(component);
       }
       this.localImageRefreshComponents.clear();
+      for (const observer of this.lightboxObservers.values()) {
+        observer.disconnect();
+      }
+      this.lightboxObservers.clear();
+      this.lightboxImageRefreshComponents.clear();
     });
   }
 
@@ -230,7 +237,7 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
 
   private handleModify(file: TAbstractFile): void {
     if (this.pluginSettingsComponent.settings.shouldAutoRefreshEmbeddedImages && isFile(file)) {
-      for (const component of this.localImageRefreshComponents.values()) {
+      for (const component of [...this.localImageRefreshComponents.values(), ...this.lightboxImageRefreshComponents.values()]) {
         component.refreshFile(this.app.vault.getResourcePath(file));
       }
     }
@@ -318,13 +325,54 @@ export class RefreshAnyViewComponent extends LayoutReadyComponent {
 
   private syncImageWatching(): void {
     const isEnabled = this.pluginSettingsComponent.settings.shouldAutoRefreshEmbeddedImages;
+    const documents = new Set<Document>();
     if (isEnabled) {
       for (const leaf of this.getLeaves((candidate) => !candidate.isDeferred)) {
         this.getLocalImageRefreshComponent(leaf.view);
+        documents.add(leaf.view.containerEl.ownerDocument);
       }
     }
     for (const [view, component] of this.localImageRefreshComponents) {
       component.setWatching(isEnabled && this.pluginSettingsComponent.settings.isViewTypeIncluded(view.getViewType()), isEnabled ? this.app.vault.adapter.getResourcePath('') : '');
+    }
+    this.syncLightboxImages(documents);
+  }
+
+  private syncLightboxImages(documents: ReadonlySet<Document>): void {
+    const lightboxElements = new Set<HTMLElement>();
+    for (const doc of documents) {
+      if (!this.lightboxObservers.has(doc)) {
+        // Obsidian appends its zoom viewer directly to the body, outside every View.
+        const observer = new MutationObserver(() => {
+          this.syncImageWatching();
+        });
+        observer.observe(doc.body, { childList: true });
+        this.lightboxObservers.set(doc, observer);
+      }
+      for (const lightbox of doc.body.querySelectorAll<HTMLElement>(':scope > .lightbox')) {
+        lightboxElements.add(lightbox);
+        if (!this.lightboxImageRefreshComponents.has(lightbox)) {
+          const component = this.addChild(new LocalImageRefreshComponent(lightbox));
+          this.lightboxImageRefreshComponents.set(lightbox, component);
+          component.setWatching(true, this.app.vault.adapter.getResourcePath(''));
+        }
+      }
+    }
+    for (const [lightbox, component] of this.lightboxImageRefreshComponents) {
+      if (lightboxElements.has(lightbox)) {
+        continue;
+      }
+
+      this.removeChild(component);
+      this.lightboxImageRefreshComponents.delete(lightbox);
+    }
+    for (const [doc, observer] of this.lightboxObservers) {
+      if (documents.has(doc)) {
+        continue;
+      }
+
+      observer.disconnect();
+      this.lightboxObservers.delete(doc);
     }
   }
 }
